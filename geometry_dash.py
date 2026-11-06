@@ -4,6 +4,7 @@ Geometry Dash Clone — Single-file Pygame Implementation
 A side-scrolling obstacle-avoidance game inspired by Geometry Dash.
 Features smooth jumping physics, procedural obstacle generation,
 score tracking, a dynamic three-variant particle death system,
+a flowing RGB keyboard color-shifting background wave,
 collectible currency orbs, a main-menu with clickable buttons,
 a skin shop with 5 unlockable player skins, and JSON-based
 save/load persistence.
@@ -126,21 +127,40 @@ def load_save() -> dict:
     try:
         with open(SAVE_FILE, "r") as f:
             data = json.load(f)
+        if not isinstance(data, dict):
+            return defaults
         # Merge with defaults to handle missing keys in old saves
         for k, v in defaults.items():
             data.setdefault(k, v)
+        # Ensure types are valid
+        if not isinstance(data.get("unlocked_skins"), list):
+            data["unlocked_skins"] = ["default"]
+        if "default" not in data["unlocked_skins"]:
+            data["unlocked_skins"].insert(0, "default")
+        if data.get("equipped_skin") not in SKIN_MAP:
+            data["equipped_skin"] = "default"
+        if not isinstance(data.get("currency"), (int, float)):
+            data["currency"] = 0
+        if not isinstance(data.get("high_score"), (int, float)):
+            data["high_score"] = 0
         return data
-    except (json.JSONDecodeError, IOError):
+    except Exception:
         return defaults
 
 
 def write_save(data: dict):
-    """Write player data to disk as pretty-printed JSON."""
+    """Write player data to disk as pretty-printed JSON safely."""
     try:
-        with open(SAVE_FILE, "w") as f:
+        tmp_file = SAVE_FILE + ".tmp"
+        with open(tmp_file, "w") as f:
             json.dump(data, f, indent=2)
-    except IOError:
-        pass  # silently fail if write is impossible
+        if os.path.exists(tmp_file):
+            if os.path.exists(SAVE_FILE):
+                os.replace(tmp_file, SAVE_FILE)
+            else:
+                os.rename(tmp_file, SAVE_FILE)
+    except Exception:
+        pass
 
 
 # ──────────────────────────────────────────────────────────────
@@ -157,8 +177,10 @@ def random_colour() -> tuple:
 
 
 def hsv_to_rgb(h: float, s: float, v: float) -> tuple:
-    """Convert HSV (h in 0-360, s/v in 0-1) to an (R, G, B) tuple."""
+    """Convert HSV (h in 0-360, s/v in 0-1) to an (R, G, B) tuple safely clamped to [0, 255]."""
     h = h % 360
+    s = max(0.0, min(1.0, float(s)))
+    v = max(0.0, min(1.0, float(v)))
     c = v * s
     x = c * (1 - abs((h / 60) % 2 - 1))
     m = v - c
@@ -174,7 +196,11 @@ def hsv_to_rgb(h: float, s: float, v: float) -> tuple:
         r, g, b = x, 0, c
     else:
         r, g, b = c, 0, x
-    return (int((r + m) * 255), int((g + m) * 255), int((b + m) * 255))
+    return (
+        max(0, min(255, int((r + m) * 255))),
+        max(0, min(255, int((g + m) * 255))),
+        max(0, min(255, int((b + m) * 255)))
+    )
 
 
 # ──────────────────────────────────────────────────────────────
@@ -236,7 +262,7 @@ class Particle:
         self.colour = colour
         self.size = size
         self.lifetime = lifetime
-        self.max_lifetime = lifetime
+        self.max_lifetime = max(1, lifetime)
         self.shape = shape                # "circle" or "square"
         self.gravity = gravity
         self.alive = True
@@ -254,12 +280,12 @@ class Particle:
         """Render the particle with alpha fade-out."""
         if not self.alive:
             return
-        t = max(self.lifetime / self.max_lifetime, 0)
-        r = int(self.colour[0] * t)
-        g = int(self.colour[1] * t)
-        b = int(self.colour[2] * t)
+        t = max(0.0, min(1.0, self.lifetime / self.max_lifetime))
+        r = max(0, min(255, int(self.colour[0] * t)))
+        g = max(0, min(255, int(self.colour[1] * t)))
+        b = max(0, min(255, int(self.colour[2] * t)))
         col = (r, g, b)
-        sz = max(int(self.size * t), 1)
+        sz = max(1, int(self.size * t))
         if self.shape == "square":
             pygame.draw.rect(surface, col,
                              (int(self.x) - sz // 2, int(self.y) - sz // 2, sz, sz))
@@ -364,6 +390,7 @@ class Coin:
     def __init__(self, x: float, y: float, speed: float):
         self.x = x
         self.y = y
+        self.y_draw = y                   # Pre-initialized to prevent attribute crashes
         self.speed = speed
         self.radius = COIN_RADIUS
         self.collected = False
@@ -382,12 +409,12 @@ class Coin:
         cx = int(self.x)
         cy = int(self.y_draw)
         # Outer glow
-        glow_r = self.radius + 4 + int(math.sin(frame * 0.1) * 2)
+        glow_r = max(1, self.radius + 4 + int(math.sin(frame * 0.1) * 2))
         pygame.draw.circle(surface, (80, 60, 0), (cx, cy), glow_r)
         # Main body
         pygame.draw.circle(surface, GOLD, (cx, cy), self.radius)
         # Highlight
-        pygame.draw.circle(surface, YELLOW, (cx - 3, cy - 3), self.radius // 3)
+        pygame.draw.circle(surface, YELLOW, (cx - 3, cy - 3), max(1, self.radius // 3))
         # Outline
         pygame.draw.circle(surface, WHITE, (cx, cy), self.radius, 2)
 
@@ -810,7 +837,7 @@ class Game:
     # ── Button builders ───────────────────────────────────────
 
     def _build_menu_buttons(self):
-        """Create the main-menu Play and Shop buttons."""
+        """Create the main-menu Play and Shop buttons, and game-over buttons."""
         bw, bh = 200, 50
         cx = SCREEN_WIDTH // 2 - bw // 2
         self.btn_play = Button(cx, 250, bw, bh, "PLAY",
@@ -819,34 +846,35 @@ class Game:
                                self.font_med, MAGENTA, BLACK)
         self.menu_buttons = [self.btn_play, self.btn_shop]
 
+        # Game-over buttons
+        go_bw, go_bh = 160, 44
+        go_cx = SCREEN_WIDTH // 2
+        self.btn_go_retry = Button(go_cx - go_bw - 10, 340, go_bw, go_bh,
+                                   "RETRY", self.font_med, CYAN, BLACK)
+        self.btn_go_menu  = Button(go_cx + 10, 340, go_bw, go_bh,
+                                   "MENU", self.font_med, MAGENTA, BLACK)
+
     def _build_shop_buttons(self):
         """
         Create shop item rows.  Each row has a Buy / Equip button and
         is associated with a skin entry.
         """
         self.shop_items: list[dict] = []
-        start_y = 110
-        row_h = 70
+        start_y = 80
+        row_h = 64
         for i, skin in enumerate(SKINS):
             y = start_y + i * row_h
             owned = skin["id"] in self.unlocked
             is_equipped = skin["id"] == self.equipped
 
-            if skin["price"] == 0:
-                # Free default skin — only show equip
+            if skin["price"] == 0 or owned:
                 label = "EQUIPPED" if is_equipped else "EQUIP"
-                btn = Button(720, y + 12, 130, 36, label,
-                             self.font_sm, GREEN if is_equipped else LIGHT_BLUE,
-                             BLACK)
-                btn.enabled = not is_equipped
-            elif owned:
-                label = "EQUIPPED" if is_equipped else "EQUIP"
-                btn = Button(720, y + 12, 130, 36, label,
+                btn = Button(720, y + 10, 130, 36, label,
                              self.font_sm, GREEN if is_equipped else LIGHT_BLUE,
                              BLACK)
                 btn.enabled = not is_equipped
             else:
-                btn = Button(720, y + 12, 130, 36, f"BUY  {skin['price']}",
+                btn = Button(720, y + 10, 130, 36, f"BUY  {skin['price']}",
                              self.font_sm, GOLD, BLACK)
                 btn.enabled = self.currency >= skin["price"]
 
@@ -926,6 +954,9 @@ class Game:
                 self.btn_shop_back.update(mouse_pos)
                 for item in self.shop_items:
                     item["button"].update(mouse_pos)
+            elif self.state == "gameover":
+                self.btn_go_retry.update(mouse_pos)
+                self.btn_go_menu.update(mouse_pos)
 
             for s in self.stars:
                 s.update()
@@ -1110,13 +1141,33 @@ class Game:
             self._draw_gameover_overlay()
 
     def _draw_background(self):
-        """Vertical gradient from dark purple to black."""
-        for y in range(SCREEN_HEIGHT):
+        """
+        Dynamic RGB color wave background that smoothly shifts through the spectrum.
+        Uses elapsed time and HSV-to-RGB conversion with sine wave modulation
+        to mimic the slow, flowing chromatic wave of an RGB keyboard across both
+        the main menu and active gameplay.
+        """
+        ticks = pygame.time.get_ticks()
+
+        # Continuous, flowing hue progression through the 360-degree color spectrum
+        # At 0.02 deg/ms, a full chromatic cycle takes ~18 seconds
+        base_hue = (ticks * 0.02) % 360
+
+        # Draw smooth vertical gradient bands with wave displacement
+        band_h = 2  # 2-pixel vertical bands provide a continuous gradient at 60 FPS
+        for y in range(0, SCREEN_HEIGHT, band_h):
             t = y / SCREEN_HEIGHT
-            r = int(lerp(20, 5, t))
-            g = int(lerp(5, 0, t))
-            b = int(lerp(40, 10, t))
-            pygame.draw.line(self.screen, (r, g, b), (0, y), (SCREEN_WIDTH, y))
+
+            # Flowing sine wave modulation creates an undulating chromatic wave
+            wave = math.sin(ticks * 0.0018 + t * 2.8) * 18.0
+            hue = (base_hue + t * 50.0 + wave) % 360
+
+            # Value (brightness) fades from a rich glow at top (0.32) down to deep dark
+            # near the ground (0.08) so foreground obstacles, player, and HUD stay legible
+            v = lerp(0.32, 0.08, t)
+            s = 0.85
+            col = hsv_to_rgb(hue, s, v)
+            pygame.draw.rect(self.screen, col, (0, y, SCREEN_WIDTH, band_h))
 
     def _draw_ground(self):
         """Draw the scrolling ground strip with grid lines."""
@@ -1208,7 +1259,7 @@ class Game:
             is_eq = skin["id"] == self.equipped
 
             # Row background
-            row_rect = pygame.Rect(30, y, SCREEN_WIDTH - 60, 58)
+            row_rect = pygame.Rect(30, y, SCREEN_WIDTH - 60, 52)
             bg_col = (30, 35, 50) if not is_eq else (20, 50, 30)
             pygame.draw.rect(self.screen, bg_col, row_rect, border_radius=6)
             pygame.draw.rect(self.screen, GREY, row_rect, 1, border_radius=6)
@@ -1216,28 +1267,28 @@ class Game:
             # Skin preview (small rotating cube)
             preview_rot = (pygame.time.get_ticks() * 0.08) % 360
             Player.draw_preview(self.screen, skin["id"],
-                                70, y + 29, 20, preview_rot)
+                                70, y + 26, 20, preview_rot)
 
             # Name
             name_col = WHITE if owned else LIGHT_BLUE
             name_surf = self.font_med.render(skin["name"], True, name_col)
-            self.screen.blit(name_surf, (100, y + 5))
+            self.screen.blit(name_surf, (100, y + 4))
 
             # Description
             desc_surf = self.font_xs.render(skin["desc"], True, GREY)
-            self.screen.blit(desc_surf, (100, y + 35))
+            self.screen.blit(desc_surf, (100, y + 31))
 
             # Price tag (for locked skins)
             if not owned and skin["price"] > 0:
                 price_col = GOLD if self.currency >= skin["price"] else RED
                 price_surf = self.font_sm.render(
                     f"Cost: {skin['price']}", True, price_col)
-                self.screen.blit(price_surf, (560, y + 18))
+                self.screen.blit(price_surf, (560, y + 16))
 
             # Equipped indicator
             if is_eq:
                 eq_surf = self.font_xs.render("[ACTIVE]", True, GREEN)
-                self.screen.blit(eq_surf, (560, y + 18) if owned else (460, y + 18))
+                self.screen.blit(eq_surf, (560, y + 16) if owned else (460, y + 16))
 
             # Action button
             btn.draw(self.screen)
@@ -1314,14 +1365,11 @@ class Game:
                 True, GOLD).get_rect(center=(cx, 265)))
 
         # Death variant
-        variant_nice = self.death_variant.replace("_", " ").title()
+        variant_nice = (self.death_variant or "Unknown").replace("_", " ").title()
         dv = self.font_sm.render(f'Death Style: "{variant_nice}"', True, ORANGE)
         self.screen.blit(dv, dv.get_rect(center=(cx, 300)))
 
         # Retry / Menu buttons
-        mouse_pos = pygame.mouse.get_pos()
-        self.btn_go_retry.update(mouse_pos)
-        self.btn_go_menu.update(mouse_pos)
         self.btn_go_retry.draw(self.screen)
         self.btn_go_menu.draw(self.screen)
 

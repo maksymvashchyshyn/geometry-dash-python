@@ -1,0 +1,1268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Geometry Dash — Web Edition</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    body {
+      background: #0a0a14;
+      color: #fff;
+      font-family: 'Consolas', 'Courier New', monospace;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      width: 100vw;
+    }
+    #game-container {
+      position: relative;
+      box-shadow: 0 10px 40px rgba(0, 255, 255, 0.25), 0 0 100px rgba(255, 0, 255, 0.15);
+      border-radius: 12px;
+      overflow: hidden;
+      border: 2px solid rgba(255, 255, 255, 0.15);
+      max-width: 100vw;
+      max-height: 100vh;
+    }
+    canvas {
+      display: block;
+      background: #000;
+      cursor: pointer;
+    }
+    .footer-hints {
+      margin-top: 10px;
+      font-size: 13px;
+      color: #8892b0;
+      text-align: center;
+      letter-spacing: 0.5px;
+    }
+    .footer-hints span {
+      color: #00ffff;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <div id="game-container">
+    <canvas id="gameCanvas" width="900" height="500"></canvas>
+  </div>
+  <div class="footer-hints">
+    <span>SPACE</span> / <span>UP</span> / <span>CLICK</span> / <span>TAP</span> = Jump &nbsp;|&nbsp; <span>ESC</span> = Menu / Back
+  </div>
+
+  <script>
+    // --- Constants ---
+    const SCREEN_WIDTH = 900;
+    const SCREEN_HEIGHT = 500;
+    const FPS = 60;
+
+    const GRAVITY = 0.8;
+    const JUMP_STRENGTH = -13.5;
+    const GROUND_Y = SCREEN_HEIGHT - 80; // 420
+    const PLAYER_SIZE = 40;
+
+    const BASE_SCROLL_SPEED = 6;
+    const OBSTACLE_MIN_GAP = 220;
+    const OBSTACLE_MAX_GAP = 360;
+    const COIN_CHANCE = 0.35;
+    const COIN_RADIUS = 12;
+    const COIN_VALUE = 1;
+
+    // Skins Configuration
+    const SKINS = [
+      { id: "default", name: "Classic Cyan", desc: "The original cube.", price: 0 },
+      { id: "neon_outline", name: "Neon Outline", desc: "Transparent body with a glowing neon border.", price: 15 },
+      { id: "checkerboard", name: "Checkerboard", desc: "A retro 4x4 checker pattern.", price: 25 },
+      { id: "rgb_pulse", name: "RGB Pulse", desc: "Colour-shifting rainbow that pulses over time.", price: 40 },
+      { id: "fire_core", name: "Fire Core", desc: "A molten orange core with ember particles.", price: 60 }
+    ];
+    const SKIN_MAP = {};
+    SKINS.forEach(s => SKIN_MAP[s.id] = s);
+
+    // --- Helpers ---
+    function lerp(a, b, t) {
+      return a + (b - a) * t;
+    }
+
+    function hsvToRgb(h, s, v) {
+      h = ((h % 360) + 360) % 360;
+      s = Math.max(0, Math.min(1, s));
+      v = Math.max(0, Math.min(1, v));
+      const c = v * s;
+      const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+      const m = v - c;
+      let r = 0, g = 0, b = 0;
+      if (h < 60) { r = c; g = x; b = 0; }
+      else if (h < 120) { r = x; g = c; b = 0; }
+      else if (h < 180) { r = 0; g = c; b = x; }
+      else if (h < 240) { r = 0; g = x; b = c; }
+      else if (h < 300) { r = x; g = 0; b = c; }
+      else { r = c; g = 0; b = x; }
+      return [
+        Math.max(0, Math.min(255, Math.round((r + m) * 255))),
+        Math.max(0, Math.min(255, Math.round((g + m) * 255))),
+        Math.max(0, Math.min(255, Math.round((b + m) * 255)))
+      ];
+    }
+
+    const VIVID_COLORS = [
+      [0, 255, 255], [255, 0, 255], [255, 255, 0], [255, 60, 60],
+      [255, 140, 0], [80, 255, 80], [80, 120, 255], [255, 100, 180], [180, 80, 255]
+    ];
+    function randomColor() {
+      return VIVID_COLORS[Math.floor(Math.random() * VIVID_COLORS.length)];
+    }
+
+    // --- LocalStorage Save System ---
+    const STORAGE_KEY = "geometry_dash_save_data";
+    function loadSave() {
+      const defaults = {
+        currency: 0,
+        high_score: 0,
+        unlocked_skins: ["default"],
+        equipped_skin: "default"
+      };
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return defaults;
+        const data = JSON.parse(raw);
+        if (!data || typeof data !== "object") return defaults;
+        if (!Array.isArray(data.unlocked_skins)) data.unlocked_skins = ["default"];
+        if (!data.unlocked_skins.includes("default")) data.unlocked_skins.unshift("default");
+        if (!SKIN_MAP[data.equipped_skin]) data.equipped_skin = "default";
+        if (typeof data.currency !== "number") data.currency = 0;
+        if (typeof data.high_score !== "number") data.high_score = 0;
+        return Object.assign(defaults, data);
+      } catch (e) {
+        return defaults;
+      }
+    }
+
+    function writeSave(data) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      } catch (e) {}
+    }
+
+    // --- UI Button ---
+    class Button {
+      constructor(x, y, w, h, text, color = "#00ffff", textColor = "#000", hoverColor = "#ffffff", fontSize = 20) {
+        this.x = x;
+        this.y = y;
+        this.w = w;
+        this.h = h;
+        this.text = text;
+        this.color = color;
+        this.textColor = textColor;
+        this.hoverColor = hoverColor;
+        this.fontSize = fontSize;
+        this.hovered = false;
+        this.enabled = true;
+      }
+
+      update(mx, my) {
+        this.hovered = this.enabled && (mx >= this.x && mx <= this.x + this.w && my >= this.y && my <= this.y + this.h);
+      }
+
+      clicked(mx, my) {
+        return this.enabled && (mx >= this.x && mx <= this.x + this.w && my >= this.y && my <= this.y + this.h);
+      }
+
+      draw(ctx) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.roundRect(this.x, this.y, this.w, this.h, 8);
+        if (!this.enabled) {
+          ctx.fillStyle = "#1e1e1e";
+          ctx.fill();
+          ctx.strokeStyle = "#3c3c3c";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          ctx.fillStyle = "#666";
+        } else {
+          ctx.fillStyle = this.hovered ? this.hoverColor : this.color;
+          ctx.fill();
+          ctx.strokeStyle = "#fff";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          ctx.fillStyle = this.textColor;
+        }
+        ctx.font = `bold ${this.fontSize}px Consolas, monospace`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(this.text, this.x + this.w / 2, this.y + this.h / 2);
+        ctx.restore();
+      }
+    }
+
+    // --- Particle System ---
+    class Particle {
+      constructor(x, y, vx, vy, color, size, lifetime, shape = "circle", gravity = 0) {
+        this.x = x;
+        this.y = y;
+        this.vx = vx;
+        this.vy = vy;
+        this.color = color;
+        this.size = size;
+        this.lifetime = lifetime;
+        this.max_lifetime = Math.max(1, lifetime);
+        this.shape = shape;
+        this.gravity = gravity;
+        this.alive = true;
+      }
+
+      update() {
+        this.vy += this.gravity;
+        this.x += this.vx;
+        this.y += this.vy;
+        this.lifetime--;
+        if (this.lifetime <= 0) this.alive = false;
+      }
+
+      draw(ctx) {
+        if (!this.alive) return;
+        const t = Math.max(0, Math.min(1, this.lifetime / this.max_lifetime));
+        const r = Math.round(this.color[0] * t);
+        const g = Math.round(this.color[1] * t);
+        const b = Math.round(this.color[2] * t);
+        const sz = Math.max(1, this.size * t);
+
+        ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+        if (this.shape === "square") {
+          ctx.fillRect(this.x - sz / 2, this.y - sz / 2, sz, sz);
+        } else {
+          ctx.beginPath();
+          ctx.arc(this.x, this.y, sz, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+
+    class ParticleSystem {
+      constructor() {
+        this.particles = [];
+      }
+
+      novaBurst(cx, cy) {
+        for (let i = 0; i < 80; i++) {
+          const angle = Math.random() * Math.PI * 2;
+          const speed = 3 + Math.random() * 7;
+          this.particles.push(new Particle(
+            cx, cy,
+            Math.cos(angle) * speed, Math.sin(angle) * speed,
+            randomColor(), 3 + Math.random() * 4,
+            30 + Math.floor(Math.random() * 30), "circle", 0.05
+          ));
+        }
+      }
+
+      pixelShatter(cx, cy) {
+        const frag = PLAYER_SIZE / 4;
+        const half = PLAYER_SIZE / 2;
+        for (let r = 0; r < 4; r++) {
+          for (let c = 0; c < 4; c++) {
+            const fx = cx - half + c * frag + frag / 2;
+            const fy = cy - half + r * frag + frag / 2;
+            this.particles.push(new Particle(
+              fx, fy,
+              -4 + Math.random() * 8, -8 + Math.random() * 7,
+              randomColor(), frag,
+              45 + Math.floor(Math.random() * 45), "square", 0.45
+            ));
+          }
+        }
+      }
+
+      sparkShower(cx, cy) {
+        const sparkColors = [[255, 255, 0], [255, 140, 0], [255, 255, 255], [0, 255, 255]];
+        for (let i = 0; i < 70; i++) {
+          const col = sparkColors[Math.floor(Math.random() * sparkColors.length)];
+          this.particles.push(new Particle(
+            cx, cy,
+            -3 + Math.random() * 6, -16 + Math.random() * 10,
+            col, 2 + Math.random() * 3,
+            50 + Math.floor(Math.random() * 40), "circle", 0.35
+          ));
+        }
+      }
+
+      coinSparkle(cx, cy) {
+        const colors = [[255, 215, 0], [255, 255, 0], [255, 255, 255]];
+        for (let i = 0; i < 14; i++) {
+          const angle = Math.random() * Math.PI * 2;
+          const speed = 1 + Math.random() * 3;
+          const col = colors[Math.floor(Math.random() * colors.length)];
+          this.particles.push(new Particle(
+            cx, cy,
+            Math.cos(angle) * speed, Math.sin(angle) * speed,
+            col, 2 + Math.random() * 3,
+            15 + Math.floor(Math.random() * 15), "circle", 0.08
+          ));
+        }
+      }
+
+      triggerRandom(cx, cy) {
+        const variants = ["nova_burst", "pixel_shatter", "spark_shower"];
+        const pick = variants[Math.floor(Math.random() * variants.length)];
+        if (pick === "nova_burst") this.novaBurst(cx, cy);
+        else if (pick === "pixel_shatter") this.pixelShatter(cx, cy);
+        else this.sparkShower(cx, cy);
+        return pick;
+      }
+
+      update() {
+        for (let p of this.particles) p.update();
+        this.particles = this.particles.filter(p => p.alive);
+      }
+
+      draw(ctx) {
+        for (let p of this.particles) p.draw(ctx);
+      }
+
+      get active() {
+        return this.particles.length > 0;
+      }
+    }
+
+    // --- Collectible Coin ---
+    class Coin {
+      constructor(x, y, speed) {
+        this.x = x;
+        this.y = y;
+        this.y_draw = y;
+        this.speed = speed;
+        this.radius = COIN_RADIUS;
+        this.collected = false;
+        this.bob_offset = Math.random() * Math.PI * 2;
+      }
+
+      update(frame) {
+        this.x -= this.speed;
+        this.y_draw = this.y + Math.sin(frame * 0.07 + this.bob_offset) * 5;
+      }
+
+      draw(ctx, frame) {
+        if (this.collected) return;
+        const cx = this.x;
+        const cy = this.y_draw;
+        const glow_r = Math.max(1, this.radius + 4 + Math.sin(frame * 0.1) * 2);
+
+        ctx.save();
+        // Glow
+        ctx.fillStyle = "rgba(120, 90, 0, 0.4)";
+        ctx.beginPath();
+        ctx.arc(cx, cy, glow_r, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Main body
+        ctx.fillStyle = "#ffd700";
+        ctx.beginPath();
+        ctx.arc(cx, cy, this.radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Highlight
+        ctx.fillStyle = "#ffff00";
+        ctx.beginPath();
+        ctx.arc(cx - 3, cy - 3, Math.max(1, this.radius / 3), 0, Math.PI * 2);
+        ctx.fill();
+
+        // Outline
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(cx, cy, this.radius, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      isOffScreen() {
+        return this.x < -30;
+      }
+
+      get rect() {
+        const margin = 2;
+        return {
+          x: this.x - this.radius + margin,
+          y: this.y_draw - this.radius + margin,
+          w: (this.radius - margin) * 2,
+          h: (this.radius - margin) * 2
+        };
+      }
+    }
+
+    // --- Player ---
+    class Player {
+      constructor(skinId = "default") {
+        this.size = PLAYER_SIZE;
+        this.x = 120;
+        this.y = GROUND_Y - this.size;
+        this.vy = 0;
+        this.on_ground = true;
+        this.alive = true;
+        this.rotation = 0;
+        this.skin_id = skinId;
+        this.trail = [];
+      }
+
+      jump() {
+        if (this.on_ground) {
+          this.vy = JUMP_STRENGTH;
+          this.on_ground = false;
+        }
+      }
+
+      update() {
+        if (!this.alive) return;
+        this.vy += GRAVITY;
+        this.y += this.vy;
+
+        if (this.y >= GROUND_Y - this.size) {
+          this.y = GROUND_Y - this.size;
+          this.vy = 0;
+          this.on_ground = true;
+        }
+
+        if (!this.on_ground) {
+          this.rotation -= 5;
+        } else {
+          this.rotation = Math.round(this.rotation / 90) * 90;
+        }
+
+        const cx = this.x + this.size / 2;
+        const cy = this.y + this.size / 2;
+        this.trail.push([cx, cy]);
+        if (this.trail.length > 8) this.trail.shift();
+      }
+
+      draw(ctx, timestamp) {
+        if (!this.alive) return;
+        ctx.save();
+
+        // Trail
+        for (let i = 0; i < this.trail.length; i++) {
+          const frac = i / this.trail.length;
+          const sz = Math.max(2, this.size * 0.5 * frac);
+          const [tx, ty] = this.trail[i];
+          ctx.fillStyle = `rgba(0, 255, 255, ${0.25 * frac})`;
+          ctx.fillRect(tx - sz / 2, ty - sz / 2, sz, sz);
+        }
+
+        const cx = this.x + this.size / 2;
+        const cy = this.y + this.size / 2;
+        Player.drawSkin(ctx, this.skin_id, cx, cy, this.size, this.rotation, timestamp);
+        ctx.restore();
+      }
+
+      static drawSkin(ctx, skinId, cx, cy, size, rotation, timestamp) {
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate((rotation * Math.PI) / 180);
+        const half = size / 2;
+
+        if (skinId === "default") {
+          ctx.fillStyle = "#00ffff";
+          ctx.fillRect(-half, -half, size, size);
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(-half / 2, -half / 2, half, half);
+
+        } else if (skinId === "neon_outline") {
+          ctx.fillStyle = "#003c00";
+          ctx.fillRect(-half, -half, size, size);
+          ctx.strokeStyle = "#00ff50";
+          ctx.lineWidth = 4;
+          ctx.strokeRect(-half, -half, size, size);
+          ctx.strokeStyle = "#b4ffb4";
+          ctx.lineWidth = 1.5;
+          ctx.strokeRect(-half + 2, -half + 2, size - 4, size - 4);
+          ctx.fillStyle = "#00ff50";
+          ctx.beginPath();
+          ctx.arc(0, 0, Math.max(2, half / 4), 0, Math.PI * 2);
+          ctx.fill();
+
+        } else if (skinId === "checkerboard") {
+          const cell = size / 4;
+          for (let r = 0; r < 4; r++) {
+            for (let c = 0; c < 4; c++) {
+              ctx.fillStyle = (r + c) % 2 === 0 ? "#ffffff" : "#1e1e1e";
+              ctx.fillRect(-half + c * cell, -half + r * cell, cell, cell);
+            }
+          }
+          ctx.strokeStyle = "#ff00ff";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(-half, -half, size, size);
+
+        } else if (skinId === "rgb_pulse") {
+          const hue = ((timestamp || Date.now()) * 0.2) % 360;
+          const [r1, g1, b1] = hsvToRgb(hue, 1, 1);
+          const [r2, g2, b2] = hsvToRgb(hue + 120, 1, 1);
+          const [r3, g3, b3] = hsvToRgb(hue + 240, 1, 1);
+
+          ctx.fillStyle = `rgb(${r1}, ${g1}, ${b1})`;
+          ctx.fillRect(-half, -half, size, size);
+          ctx.strokeStyle = `rgb(${r2}, ${g2}, ${b2})`;
+          ctx.lineWidth = 3;
+          ctx.strokeRect(-half * 0.55, -half * 0.55, size * 0.55, size * 0.55);
+          ctx.fillStyle = `rgb(${r3}, ${g3}, ${b3})`;
+          ctx.beginPath();
+          ctx.arc(0, 0, 4, 0, Math.PI * 2);
+          ctx.fill();
+
+        } else if (skinId === "fire_core") {
+          ctx.fillStyle = "#b42800";
+          ctx.fillRect(-half, -half, size, size);
+          ctx.strokeStyle = "#ff8c00";
+          ctx.lineWidth = 3;
+          ctx.strokeRect(-half, -half, size, size);
+          ctx.fillStyle = "#ffff00";
+          ctx.fillRect(-half * 0.5, -half * 0.5, size * 0.5, size * 0.5);
+
+          // Embers
+          const emberCols = ["#ff8c00", "#ffff00", "#ff3c3c"];
+          for (let i = 0; i < 3; i++) {
+            const ex = -half * 1.2 + Math.random() * (size * 1.2);
+            const ey = -half * 1.2 + Math.random() * (size * 0.9);
+            ctx.fillStyle = emberCols[Math.floor(Math.random() * emberCols.length)];
+            ctx.beginPath();
+            ctx.arc(ex, ey, 1.5, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        } else {
+          ctx.fillStyle = "#00ffff";
+          ctx.fillRect(-half, -half, size, size);
+        }
+        ctx.restore();
+      }
+
+      get rect() {
+        const margin = 6;
+        return {
+          x: this.x + margin,
+          y: this.y + margin,
+          w: this.size - margin * 2,
+          h: this.size - margin * 2
+        };
+      }
+    }
+
+    // --- Obstacles ---
+    class SpikeObstacle {
+      constructor(x, speed) {
+        this.x = x;
+        this.speed = speed;
+        this.width = 36;
+        this.height = 44;
+        this.passed = false;
+      }
+      update() { this.x -= this.speed; }
+      isOffScreen() { return this.x < -80; }
+      draw(ctx) {
+        const bx = this.x;
+        const by = GROUND_Y;
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(bx + this.width / 2, by - this.height);
+        ctx.lineTo(bx, by);
+        ctx.lineTo(bx + this.width, by);
+        ctx.closePath();
+        ctx.fillStyle = "#ff3c3c";
+        ctx.fill();
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.restore();
+      }
+      get rect() {
+        const mx = 8, mt = 10;
+        return { x: this.x + mx, y: GROUND_Y - this.height + mt, w: this.width - mx * 2, h: this.height - mt };
+      }
+    }
+
+    class BlockObstacle {
+      constructor(x, speed) {
+        this.x = x;
+        this.speed = speed;
+        this.width = 40;
+        const heights = [40, 60, 80];
+        this.height = heights[Math.floor(Math.random() * heights.length)];
+        this.passed = false;
+      }
+      update() { this.x -= this.speed; }
+      isOffScreen() { return this.x < -80; }
+      draw(ctx) {
+        const bx = this.x;
+        const by = GROUND_Y - this.height;
+        ctx.save();
+        ctx.fillStyle = "#ff00ff";
+        ctx.fillRect(bx, by, this.width, this.height);
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(bx, by, this.width, this.height);
+
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(bx, by); ctx.lineTo(bx + this.width, by + this.height);
+        ctx.moveTo(bx + this.width, by); ctx.lineTo(bx, by + this.height);
+        ctx.stroke();
+        ctx.restore();
+      }
+      get rect() {
+        const m = 4;
+        return { x: this.x + m, y: GROUND_Y - this.height + m, w: this.width - m * 2, h: this.height - m * 2 };
+      }
+    }
+
+    class DoubleSpikeObstacle {
+      constructor(x, speed) {
+        this.x = x;
+        this.speed = speed;
+        this.width = 60;
+        this.spike_w = 30;
+        this.height = 44;
+        this.passed = false;
+      }
+      update() { this.x -= this.speed; }
+      isOffScreen() { return this.x < -80; }
+      draw(ctx) {
+        ctx.save();
+        for (let i = 0; i < 2; i++) {
+          const bx = this.x + i * this.spike_w;
+          const by = GROUND_Y;
+          ctx.beginPath();
+          ctx.moveTo(bx + this.spike_w / 2, by - this.height);
+          ctx.lineTo(bx, by);
+          ctx.lineTo(bx + this.spike_w, by);
+          ctx.closePath();
+          ctx.fillStyle = "#ff8c00";
+          ctx.fill();
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+      get rect() {
+        const mx = 6, mt = 10;
+        return { x: this.x + mx, y: GROUND_Y - this.height + mt, w: this.width - mx * 2, h: this.height - mt };
+      }
+    }
+
+    // --- Background Star ---
+    class BackgroundStar {
+      constructor() {
+        this.reset(Math.random() * SCREEN_WIDTH);
+      }
+      reset(x = null) {
+        this.x = x !== null ? x : SCREEN_WIDTH + Math.random() * 100;
+        this.y = 10 + Math.random() * (GROUND_Y - 30);
+        this.speed = 0.3 + Math.random() * 1.2;
+        this.size = 1 + Math.random() * 2;
+        const b = Math.floor(60 + Math.random() * 140);
+        this.color = `rgb(${b}, ${b}, ${b + 40})`;
+      }
+      update() {
+        this.x -= this.speed;
+        if (this.x < -5) this.reset();
+      }
+      draw(ctx) {
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // --- Collision Helper ---
+    function checkCollision(r1, r2) {
+      return (
+        r1.x < r2.x + r2.w &&
+        r1.x + r1.w > r2.x &&
+        r1.y < r2.y + r2.h &&
+        r1.y + r1.h > r2.y
+      );
+    }
+
+    // --- Main Game Class ---
+    class Game {
+      constructor(canvas) {
+        this.canvas = canvas;
+        this.ctx = canvas.getContext("2d");
+        this.frame = 0;
+
+        this.stars = Array.from({ length: 60 }, () => new BackgroundStar());
+        this.saveData = loadSave();
+        this.currency = this.saveData.currency;
+        this.highScore = this.saveData.high_score;
+        this.unlocked = [...this.saveData.unlocked_skins];
+        this.equipped = this.saveData.equipped_skin;
+
+        this.mousePos = { x: 0, y: 0 };
+        this.state = "menu"; // "menu", "shop", "playing", "dying", "gameover"
+
+        this.buildMenuButtons();
+        this.buildShopButtons();
+        this.resetGameplay();
+
+        this.initEvents();
+      }
+
+      persist() {
+        this.saveData.currency = this.currency;
+        this.saveData.high_score = this.highScore;
+        this.saveData.unlocked_skins = this.unlocked;
+        this.saveData.equipped_skin = this.equipped;
+        writeSave(this.saveData);
+      }
+
+      buildMenuButtons() {
+        const bw = 200, bh = 50;
+        const cx = SCREEN_WIDTH / 2 - bw / 2;
+        this.btnPlay = new Button(cx, 250, bw, bh, "PLAY", "#00ffff", "#000", "#fff", 24);
+        this.btnShop = new Button(cx, 320, bw, bh, "SHOP", "#ff00ff", "#000", "#fff", 24);
+        this.menuButtons = [this.btnPlay, this.btnShop];
+
+        const goBw = 160, goBh = 44;
+        const goCx = SCREEN_WIDTH / 2;
+        this.btnGoRetry = new Button(goCx - goBw - 10, 340, goBw, goBh, "RETRY", "#00ffff", "#000", "#fff", 22);
+        this.btnGoMenu = new Button(goCx + 10, 340, goBw, goBh, "MENU", "#ff00ff", "#000", "#fff", 22);
+      }
+
+      buildShopButtons() {
+        this.shopItems = [];
+        const startY = 80;
+        const rowH = 64;
+        SKINS.forEach((skin, i) => {
+          const y = startY + i * rowH;
+          const owned = this.unlocked.includes(skin.id);
+          const isEquipped = skin.id === this.equipped;
+
+          let label = "EQUIP";
+          let col = "#64b4ff";
+          let enabled = true;
+
+          if (skin.price === 0 || owned) {
+            label = isEquipped ? "EQUIPPED" : "EQUIP";
+            col = isEquipped ? "#50ff50" : "#64b4ff";
+            enabled = !isEquipped;
+          } else {
+            label = `BUY ${skin.price}`;
+            col = "#ffd700";
+            enabled = this.currency >= skin.price;
+          }
+
+          const btn = new Button(720, y + 10, 130, 36, label, col, "#000", "#fff", 18);
+          btn.enabled = enabled;
+
+          this.shopItems.push({ skin, y, button: btn });
+        });
+
+        this.btnShopBack = new Button(20, 15, 100, 36, "< BACK", "#ffffff", "#000", "#00ffff", 18);
+      }
+
+      resetGameplay() {
+        this.player = new Player(this.equipped);
+        this.obstacles = [];
+        this.coins = [];
+        this.particles = new ParticleSystem();
+        this.score = 0;
+        this.coinsThisRun = 0;
+        this.scrollSpeed = BASE_SCROLL_SPEED;
+        this.distance = 0;
+        this.nextObstacleDist = 300;
+        this.deathVariant = "";
+        this.groundOffset = 0;
+        this.flashTimer = 0;
+      }
+
+      startGame() {
+        this.state = "playing";
+        this.resetGameplay();
+      }
+
+      goToMenu() {
+        this.persist();
+        this.buildShopButtons();
+        this.resetGameplay();
+        this.state = "menu";
+      }
+
+      initEvents() {
+        const updateCoords = (e) => {
+          const rect = this.canvas.getBoundingClientRect();
+          const scaleX = SCREEN_WIDTH / rect.width;
+          const scaleY = SCREEN_HEIGHT / rect.height;
+          const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+          const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+          this.mousePos.x = (clientX - rect.left) * scaleX;
+          this.mousePos.y = (clientY - rect.top) * scaleY;
+        };
+
+        window.addEventListener("mousemove", updateCoords);
+        window.addEventListener("touchmove", updateCoords, { passive: false });
+
+        const handleAction = (e) => {
+          if (e.type === "touchstart") e.preventDefault();
+          updateCoords(e);
+          const mx = this.mousePos.x;
+          const my = this.mousePos.y;
+
+          if (this.state === "menu") {
+            if (this.btnPlay.clicked(mx, my)) this.startGame();
+            else if (this.btnShop.clicked(mx, my)) {
+              this.buildShopButtons();
+              this.state = "shop";
+            }
+          } else if (this.state === "shop") {
+            if (this.btnShopBack.clicked(mx, my)) {
+              this.goToMenu();
+            } else {
+              for (let item of this.shopItems) {
+                if (item.button.clicked(mx, my)) {
+                  const skin = item.skin;
+                  if (this.unlocked.includes(skin.id)) {
+                    this.equipped = skin.id;
+                  } else if (this.currency >= skin.price) {
+                    this.currency -= skin.price;
+                    this.unlocked.push(skin.id);
+                    this.equipped = skin.id;
+                  }
+                  this.persist();
+                  this.buildShopButtons();
+                  break;
+                }
+              }
+            }
+          } else if (this.state === "playing") {
+            this.player.jump();
+          } else if (this.state === "gameover") {
+            if (this.btnGoRetry.clicked(mx, my)) this.startGame();
+            else if (this.btnGoMenu.clicked(mx, my)) this.goToMenu();
+          }
+        };
+
+        this.canvas.addEventListener("mousedown", handleAction);
+        this.canvas.addEventListener("touchstart", handleAction, { passive: false });
+
+        window.addEventListener("keydown", (e) => {
+          if (e.code === "Space" || e.code === "ArrowUp") {
+            e.preventDefault();
+            if (this.state === "playing") this.player.jump();
+            else if (this.state === "gameover") this.startGame();
+            else if (this.state === "menu") this.startGame();
+          } else if (e.code === "Escape") {
+            if (this.state === "shop" || this.state === "gameover" || this.state === "playing") {
+              this.goToMenu();
+            }
+          }
+        });
+      }
+
+      update() {
+        this.frame++;
+        const mx = this.mousePos.x;
+        const my = this.mousePos.y;
+
+        // Button hover states
+        if (this.state === "menu") {
+          for (let b of this.menuButtons) b.update(mx, my);
+        } else if (this.state === "shop") {
+          this.btnShopBack.update(mx, my);
+          for (let item of this.shopItems) item.button.update(mx, my);
+        } else if (this.state === "gameover") {
+          this.btnGoRetry.update(mx, my);
+          this.btnGoMenu.update(mx, my);
+        }
+
+        // Stars
+        for (let s of this.stars) s.update();
+
+        // Gameplay update
+        if (this.state === "playing") {
+          this.player.update();
+          this.scrollSpeed = BASE_SCROLL_SPEED + this.score * 0.03;
+          this.groundOffset = (this.groundOffset + this.scrollSpeed) % 40;
+
+          this.distance += this.scrollSpeed;
+          const newScore = Math.floor(this.distance / 80);
+          if (newScore > this.score) this.score = newScore;
+
+          // Spawn obstacles
+          this.nextObstacleDist -= this.scrollSpeed;
+          if (this.nextObstacleDist <= 0) {
+            this.spawnObstacle();
+            let gap = OBSTACLE_MIN_GAP + Math.random() * (OBSTACLE_MAX_GAP - OBSTACLE_MIN_GAP);
+            gap = Math.max(160, gap - this.score);
+            this.nextObstacleDist = gap;
+          }
+
+          // Obstacles update & collision
+          for (let obs of this.obstacles) {
+            obs.speed = this.scrollSpeed;
+            obs.update();
+            if (!obs.passed && obs.x + 60 < this.player.x) obs.passed = true;
+            if (checkCollision(this.player.rect, obs.rect)) {
+              this.killPlayer();
+              return;
+            }
+          }
+          this.obstacles = this.obstacles.filter(o => !o.isOffScreen());
+
+          // Coins update & collection
+          for (let coin of this.coins) {
+            coin.speed = this.scrollSpeed;
+            coin.update(this.frame);
+            if (!coin.collected && checkCollision(this.player.rect, coin.rect)) {
+              coin.collected = true;
+              this.coinsThisRun += COIN_VALUE;
+              this.currency += COIN_VALUE;
+              this.particles.coinSparkle(coin.x, coin.y_draw);
+            }
+          }
+          this.coins = this.coins.filter(c => !c.isOffScreen() && !c.collected);
+
+          this.particles.update();
+        } else if (this.state === "dying") {
+          this.particles.update();
+          this.flashTimer = Math.max(0, this.flashTimer - 1);
+          this.groundOffset = (this.groundOffset + 2) % 40;
+          if (!this.particles.active) {
+            this.state = "gameover";
+          }
+        }
+      }
+
+      killPlayer() {
+        this.player.alive = false;
+        const cx = this.player.x + this.player.size / 2;
+        const cy = this.player.y + this.player.size / 2;
+        this.deathVariant = this.particles.triggerRandom(cx, cy);
+        this.state = "dying";
+        this.flashTimer = 8;
+        if (this.score > this.highScore) {
+          this.highScore = this.score;
+        }
+        this.persist();
+      }
+
+      spawnObstacle() {
+        const x = SCREEN_WIDTH + Math.random() * 40;
+        const roll = Math.random();
+        let obs;
+        if (roll < 0.45) obs = new SpikeObstacle(x, this.scrollSpeed);
+        else if (roll < 0.75) obs = new BlockObstacle(x, this.scrollSpeed);
+        else obs = new DoubleSpikeObstacle(x, this.scrollSpeed);
+        this.obstacles.push(obs);
+
+        if (Math.random() < COIN_CHANCE) {
+          const coinX = x - 20 + Math.random() * 70;
+          const coinY = GROUND_Y - (70 + Math.random() * 70);
+          this.coins.push(new Coin(coinX, coinY, this.scrollSpeed));
+        }
+      }
+
+      // --- Drawing Methods ---
+      drawBackground(timestamp) {
+        const ticks = timestamp || Date.now();
+        const baseHue = (ticks * 0.02) % 360;
+
+        const bandH = 3;
+        for (let y = 0; y < SCREEN_HEIGHT; y += bandH) {
+          const t = y / SCREEN_HEIGHT;
+          const wave = Math.sin(ticks * 0.0018 + t * 2.8) * 18.0;
+          const hue = (baseHue + t * 50.0 + wave) % 360;
+          const v = lerp(0.32, 0.08, t);
+          const [r, g, b] = hsvToRgb(hue, 0.85, v);
+          this.ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+          this.ctx.fillRect(0, y, SCREEN_WIDTH, bandH);
+        }
+      }
+
+      drawGround() {
+        const ctx = this.ctx;
+        ctx.fillStyle = "#3c3c3c";
+        ctx.fillRect(0, GROUND_Y, SCREEN_WIDTH, SCREEN_HEIGHT - GROUND_Y);
+
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(0, GROUND_Y);
+        ctx.lineTo(SCREEN_WIDTH, GROUND_Y);
+        ctx.stroke();
+
+        ctx.strokeStyle = "#1e1e1e";
+        ctx.lineWidth = 1;
+        const step = 40;
+        const offset = Math.floor(this.groundOffset);
+        for (let gx = -step + offset; gx < SCREEN_WIDTH + step; gx += step) {
+          const x = SCREEN_WIDTH - gx;
+          ctx.beginPath();
+          ctx.moveTo(x, GROUND_Y + 1);
+          ctx.lineTo(x, SCREEN_HEIGHT);
+          ctx.stroke();
+        }
+      }
+
+      drawCurrencyBadge(x, y) {
+        const ctx = this.ctx;
+        ctx.save();
+        ctx.fillStyle = "#ffd700";
+        ctx.beginPath();
+        ctx.arc(x + 10, y + 10, 10, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "#ffff00";
+        ctx.beginPath();
+        ctx.arc(x + 8, y + 8, 4, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(x + 10, y + 10, 10, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.fillStyle = "#ffd700";
+        ctx.font = "bold 20px Consolas, monospace";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText(`${this.currency}`, x + 26, y + 10);
+        ctx.restore();
+      }
+
+      render(timestamp) {
+        this.ctx.clearRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+
+        this.drawBackground(timestamp);
+
+        for (let s of this.stars) s.draw(this.ctx);
+
+        if (this.state === "menu") {
+          this.drawMenu(timestamp);
+        } else if (this.state === "shop") {
+          this.drawShop(timestamp);
+        } else if (this.state === "playing" || this.state === "dying") {
+          this.drawGame(timestamp);
+        } else if (this.state === "gameover") {
+          this.drawGame(timestamp);
+          this.drawGameOverOverlay();
+        }
+      }
+
+      drawMenu(timestamp) {
+        const ctx = this.ctx;
+        this.drawGround();
+
+        // Title
+        ctx.save();
+        ctx.fillStyle = "#00ffff";
+        ctx.font = "bold 52px Consolas, monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("GEOMETRY  DASH", SCREEN_WIDTH / 2, 100);
+
+        ctx.strokeStyle = "#ff00ff";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(SCREEN_WIDTH / 2 - 180, 140);
+        ctx.lineTo(SCREEN_WIDTH / 2 + 180, 140);
+        ctx.stroke();
+
+        ctx.fillStyle = "#64b4ff";
+        ctx.font = "20px Consolas, monospace";
+        ctx.fillText("Web Edition", SCREEN_WIDTH / 2, 170);
+
+        if (this.highScore > 0) {
+          ctx.fillStyle = "#ffff00";
+          ctx.font = "bold 20px Consolas, monospace";
+          ctx.fillText(`High Score: ${this.highScore}`, SCREEN_WIDTH / 2, 210);
+        }
+
+        for (let b of this.menuButtons) b.draw(ctx);
+
+        this.drawCurrencyBadge(SCREEN_WIDTH - 140, 15);
+
+        // Rotating preview
+        const rot = ((timestamp || Date.now()) * 0.1) % 360;
+        Player.drawSkin(ctx, this.equipped, SCREEN_WIDTH / 2, 405, 26, rot, timestamp);
+
+        ctx.fillStyle = "#666";
+        ctx.font = "16px Consolas, monospace";
+        ctx.fillText("SPACE/UP/CLICK = Jump  |  Mouse/Touch = UI", SCREEN_WIDTH / 2, SCREEN_HEIGHT - 20);
+        ctx.restore();
+      }
+
+      drawShop(timestamp) {
+        const ctx = this.ctx;
+        this.drawGround();
+
+        ctx.save();
+        ctx.fillStyle = "#ff00ff";
+        ctx.font = "bold 52px Consolas, monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("SKIN  SHOP", SCREEN_WIDTH / 2, 55);
+
+        this.drawCurrencyBadge(SCREEN_WIDTH - 140, 15);
+        this.btnShopBack.draw(ctx);
+
+        for (let item of this.shopItems) {
+          const skin = item.skin;
+          const y = item.y;
+          const owned = this.unlocked.includes(skin.id);
+          const isEq = skin.id === this.equipped;
+
+          // Row background
+          ctx.beginPath();
+          ctx.roundRect(30, y, SCREEN_WIDTH - 60, 52, 6);
+          ctx.fillStyle = isEq ? "#14321e" : "#1e2332";
+          ctx.fill();
+          ctx.strokeStyle = "#3c3c3c";
+          ctx.lineWidth = 1;
+          ctx.stroke();
+
+          // Preview
+          const previewRot = ((timestamp || Date.now()) * 0.08) % 360;
+          Player.drawSkin(ctx, skin.id, 70, y + 26, 20, previewRot, timestamp);
+
+          // Name
+          ctx.fillStyle = owned ? "#ffffff" : "#64b4ff";
+          ctx.font = "bold 24px Consolas, monospace";
+          ctx.textAlign = "left";
+          ctx.fillText(skin.name, 100, y + 22);
+
+          // Desc
+          ctx.fillStyle = "#888";
+          ctx.font = "14px Consolas, monospace";
+          ctx.fillText(skin.desc, 100, y + 42);
+
+          // Price
+          if (!owned && skin.price > 0) {
+            ctx.fillStyle = this.currency >= skin.price ? "#ffd700" : "#ff3c3c";
+            ctx.font = "bold 18px Consolas, monospace";
+            ctx.fillText(`Cost: ${skin.price}`, 560, y + 32);
+          }
+
+          if (isEq) {
+            ctx.fillStyle = "#50ff50";
+            ctx.font = "bold 16px Consolas, monospace";
+            ctx.fillText("[ACTIVE]", 560, y + 32);
+          }
+
+          item.button.draw(ctx);
+        }
+        ctx.restore();
+      }
+
+      drawGame(timestamp) {
+        const ctx = this.ctx;
+        this.drawGround();
+
+        for (let obs of this.obstacles) obs.draw(ctx);
+        for (let coin of this.coins) coin.draw(ctx, this.frame);
+
+        this.player.draw(ctx, timestamp);
+        this.particles.draw(ctx);
+
+        if (this.flashTimer > 0) {
+          ctx.fillStyle = `rgba(255, 255, 255, ${0.8 * (this.flashTimer / 8)})`;
+          ctx.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+        }
+
+        // HUD
+        ctx.save();
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 28px Consolas, monospace";
+        ctx.textAlign = "left";
+        ctx.fillText(`Score: ${this.score}`, 20, 35);
+
+        ctx.fillStyle = "#64b4ff";
+        ctx.font = "18px Consolas, monospace";
+        ctx.fillText(`Speed: ${this.scrollSpeed.toFixed(1)}`, 20, 65);
+
+        this.drawCurrencyBadge(SCREEN_WIDTH - 140, 15);
+        ctx.fillStyle = "#ffff00";
+        ctx.font = "16px Consolas, monospace";
+        ctx.fillText(`+${this.coinsThisRun} this run`, SCREEN_WIDTH - 140, 48);
+        ctx.restore();
+      }
+
+      drawGameOverOverlay() {
+        const ctx = this.ctx;
+        ctx.save();
+        ctx.fillStyle = "rgba(0, 0, 0, 0.65)";
+        ctx.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+
+        const cx = SCREEN_WIDTH / 2;
+
+        ctx.fillStyle = "#ff3c3c";
+        ctx.font = "bold 52px Consolas, monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("GAME OVER", cx, 120);
+
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 28px Consolas, monospace";
+        ctx.fillText(`Score: ${this.score}`, cx, 190);
+
+        ctx.fillStyle = "#ffff00";
+        ctx.font = "bold 28px Consolas, monospace";
+        ctx.fillText(`High Score: ${this.highScore}`, cx, 225);
+
+        ctx.fillStyle = "#ffd700";
+        ctx.font = "20px Consolas, monospace";
+        ctx.fillText(`Coins earned: +${this.coinsThisRun}  (Total: ${this.currency})`, cx, 265);
+
+        const variantName = (this.deathVariant || "Unknown").replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+        ctx.fillStyle = "#ff8c00";
+        ctx.font = "20px Consolas, monospace";
+        ctx.fillText(`Death Style: "${variantName}"`, cx, 300);
+
+        this.btnGoRetry.draw(ctx);
+        this.btnGoMenu.draw(ctx);
+
+        ctx.fillStyle = "#888";
+        ctx.font = "16px Consolas, monospace";
+        ctx.fillText("SPACE to retry  |  ESC for menu", cx, 400);
+        ctx.restore();
+      }
+
+      loop(timestamp) {
+        this.update();
+        this.render(timestamp);
+        requestAnimationFrame((ts) => this.loop(ts));
+      }
+    }
+
+    // Auto-scale canvas for mobile & desktop screens
+    function resizeCanvas() {
+      const container = document.getElementById("game-container");
+      const canvas = document.getElementById("gameCanvas");
+      const aspect = SCREEN_WIDTH / SCREEN_HEIGHT;
+      const pad = 40;
+      const maxW = window.innerWidth - pad;
+      const maxH = window.innerHeight - 80;
+
+      let w = maxW;
+      let h = w / aspect;
+      if (h > maxH) {
+        h = maxH;
+        w = h * aspect;
+      }
+      canvas.style.width = `${Math.floor(w)}px`;
+      canvas.style.height = `${Math.floor(h)}px`;
+    }
+
+    window.addEventListener("resize", resizeCanvas);
+    resizeCanvas();
+
+    const game = new Game(document.getElementById("gameCanvas"));
+    requestAnimationFrame((ts) => game.loop(ts));
+  </script>
+</body>
+</html>

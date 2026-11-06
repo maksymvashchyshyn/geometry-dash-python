@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+save_data.json
+save_data.json.tmp
+test_save.json
+test_save.json.tmp
